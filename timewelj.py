@@ -1,18 +1,14 @@
-import os
-import sys
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn
-from sklearn.preprocessing import MinMaxScaler,StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 # a dictionary that maps HARPNUM to NOAA_ARS
 HARP = {}
 
 # process txt file
-with open("datasets/2010/all_harps_with_noaa_ars.txt") as file:
+with open("datasets/data-2010-15/all_harps_with_noaa_ars.txt") as file:
     # skip header
     next(file)
     # parse line by line
@@ -28,44 +24,48 @@ with open("datasets/2010/all_harps_with_noaa_ars.txt") as file:
         HARP[line_[0][0]] = line_[1]
 
 # an array with 8 columns and 660 rows, each row contains details about a GOES event
-goes = np.load("datasets/2010/goes_data.npy", allow_pickle=True)
+goes = np.load("datasets/data-2010-15/goes_data.npy", allow_pickle=True)
 
 # an array with 3 columns and 315 rows, columns are: HARPNUM, Peak Flare Time, Class of Energy Burst    
-posClass = np.load("datasets/2010/pos_class.npy")
+posClass = np.load("datasets/data-2010-15/pos_class.npy")
 
 # an array with 3 columns and 315 rows, columns are: HARPNUM, Peak Flare Time, Class of Energy Burst    
-negClass = np.load("datasets/2010/neg_class.npy", allow_pickle=True)
+negClass = np.load("datasets/data-2010-15/neg_class.npy", allow_pickle=True)
 
 # an array with 3 columns and 630 rows, combining the previous two arrays
-allClass = np.concatenate((posClass,negClass), axis=0)
+allClass = np.concatenate((posClass, negClass), axis=0)
 
 class my_svm():
 
     def __init__(self,year):
         # initalize variables
+        self.C = 0.001
+        self.epochs = 500
+        self.learning_rate = 0.01
+
         # an array with 90 columns and 315 rows, columns 1 - 18 are the features of positive solar events
-        pos = np.load("datasets/" + year + "/pos_features_main_timechange.npy")
+        pos = np.load("datasets/data-" + year + "/pos_features_main_timechange.npy")
 
         # an array with 90 columns and 315 rows, columns 1 - 18 are the features of negative solar events
-        neg = np.load("datasets/" + year + "/neg_features_main_timechange.npy")
+        neg = np.load("datasets/data-" + year + "/neg_features_main_timechange.npy")
 
         # an array with 1 column and 315 rows, column 1 is an additional feature of positive solar events
-        posHist = np.load("datasets/" + year + "/pos_features_historical.npy")
+        posHist = np.load("datasets/data-" + year + "/pos_features_historical.npy")
 
         # an array with 1 column and 315 rows, column 1 is an additional feature of negative solar events
-        negHist = np.load("datasets/" + year + "/neg_features_historical.npy")
+        negHist = np.load("datasets/data-" + year + "/neg_features_historical.npy")
 
         # an array with 18 columns and 315 rows, columns are additional features of positive solar events
-        posMaxMin = np.load("datasets/" + year + "/pos_features_maxmin.npy", allow_pickle=True)
+        posMaxMin = np.load("datasets/data-" + year + "/pos_features_maxmin.npy", allow_pickle=True)
 
         # an array with 18 columns and 315 rows, columns are additional features of negative solar events
-        negMaxMin = np.load("datasets/" + year + "/neg_features_maxmin.npy", allow_pickle=True)
+        negMaxMin = np.load("datasets/data-" + year + "/neg_features_maxmin.npy", allow_pickle=True)
 
         # an array of indices, this is the order we should train the model in (so start with 485th observation, then 575th)
-        self.order = np.load("datasets/" + year + "/data_order.npy")
+        self.order = np.load("datasets/data-" + year + "/data_order.npy")
 
         # organize data for preprocess
-        self.data = [[pos[:,:18],neg[:,:18]], [pos[:,18:],neg[:,18:]], [posHist,negHist], [posMaxMin,negMaxMin]]
+        self.data = [[pos[:,:18], neg[:,:18]], [pos[:,18:], neg[:,18:]], [posHist, negHist], [posMaxMin, negMaxMin]]
 
     def preprocess(self,):
         # combine all data for normalization
@@ -74,12 +74,15 @@ class my_svm():
         # using StandardScaler to normalize the input
         scalar = StandardScaler().fit(processed_data)
         data_normalized = scalar.transform(processed_data)
+
+        # remove missing values
+        data_normalized = data_normalized[~np.isnan(data_normalized).any(axis=1)]
         
         # assign labels to target (1 and -1)
-        target = [np.ones((len(self.data[0][0]),1)),-np.ones((len(self.data[0][1]),1))]
+        target = [np.ones((len(self.data[0][0]),1)), -np.ones((len(self.data[0][1]),1))]
         
         # un-combine all data back to feature sets, return with target
-        return [data_normalized[:,:18],data_normalized[:,18:90],data_normalized[:,90:91],data_normalized[:,91:]], target
+        return [data_normalized[:,:18], data_normalized[:,18:90], data_normalized[:,90:91], data_normalized[:,91:]], target
     
     def feature_creation(self, fs_value):
         # preprocess data
@@ -99,7 +102,7 @@ class my_svm():
         bias = np.ones(len(processed[i]))
         return np.column_stack((processed[i], bias)), np.concatenate((target[0], target[1]), axis = 0)
     
-    def feature_combination_creator(self,fs_values):
+    def feature_combination_creator(self, fs_values):
         # start by creating first feature set
         X,Y = self.feature_creation(fs_values[0])
 
@@ -116,13 +119,16 @@ class my_svm():
         self.weights = np.zeros(X.shape[1])
 
         accuracies = []
-        y_trues = []
-        y_preds = []
+        best_y_true = []
+        best_y_pred = []
+        best_acc = -1
 
         # use k-fold with k=10
-        for k in range(10):
+        k_fold = KFold(n_splits=10)
+        for train, test in k_fold.split(X):
             # split the data into train and test sets
-            x_train, x_test, y_train, y_test = train_test_split(X, Y, test_size=0.1)
+            x_train, x_test = X[train], X[test]
+            y_train, y_test = Y[train], Y[test]
 
             # call training function
             self.training(x_train, y_train)
@@ -133,10 +139,12 @@ class my_svm():
             # call tss function
             accuracy = self.tss(y_test, y_pred)
 
-            # save values for averaging
+            # save values for averaging and best fold for confusion matrix
             accuracies.append(accuracy)
-            y_trues.append(y_test.ravel())
-            y_preds.append(y_pred)
+            if accuracy > best_acc:
+                best_y_true = y_test.ravel()
+                best_y_pred = y_pred
+                best_acc = accuracy
 
         # create chart for visualizing
         # set the plot and plot size
@@ -159,15 +167,8 @@ class my_svm():
         # show the plot
         plt.show()
 
-        # create values for confusion matrix
-        y_trues_combined = y_trues[0]
-        y_preds_combined = y_preds[0]
-        for pred in y_preds[1:]:
-            y_trues_combined = np.concatenate((y_trues_combined,pred), axis=0)
-            y_preds_combined = np.concatenate((y_preds_combined,pred), axis=0)
-
-        # display confusion matrix
-        disp = ConfusionMatrixDisplay(confusion_matrix(y_trues_combined,y_preds_combined))
+        # display confusion matrix for best fold
+        disp = ConfusionMatrixDisplay(confusion_matrix(best_y_true,best_y_pred, labels=[-1,1]),display_labels=[-1,1])
         disp.plot()
         plt.title("Confusion Matrix for Feature Set " + str(feature_set))
         plt.show()
@@ -184,7 +185,6 @@ class my_svm():
         return new_x, new_y
     
     def compute_gradient(self,X,Y):
-        C = 0.001
         # organize the array as vector
         X_ = np.array([X])
 
@@ -197,18 +197,16 @@ class my_svm():
         if max(0, hinge_distance[0]) == 0:
             total_distance += self.weights
         else:
-            total_distance += self.weights - (C * Y[0] * X_[0])
+            total_distance += self.weights - (self.C * Y[0] * X_[0])
 
         return total_distance
     
     def training(self, X, Y):
-        epochs = 1000
-        learning_rate = 0.01
         # execute the stochastic gradient descent function for defined epochs
-        for epoch in range(epochs):
+        for epoch in range(self.epochs):
             for i, feature in enumerate(X):
                 gradient = self.compute_gradient(feature, Y[i])
-                self.weights = self.weights - (learning_rate * gradient)
+                self.weights = self.weights - (self.learning_rate * gradient)
     
     def predict(self,X):
         # compute predictions on test set
@@ -241,7 +239,7 @@ def power_set(s):
     
 def feature_experiment():
     # train (and test) on 2010 dataset
-    svm = my_svm("2010")
+    svm = my_svm("2010-15")
     feature_sets = power_set(["FS-I","FS-II","FS-III","FS-IV"])
     max_tss = [-1,"NONE"]
 
@@ -265,9 +263,9 @@ def feature_experiment():
     print("Best performing feature set:", str(max_tss[1]))
     return max_tss[1]
 
-def data_experiment(feature_combo):
+def data_experiment(feature_combo = ['FS-IV']):
     # use the best performing feature combination from feature_experiment on 2010 data
-    svm_2010 = my_svm("2010")
+    svm_2010 = my_svm("2010-15")
 
     # combine feature sets
     X,Y = svm_2010.feature_combination_creator(feature_combo)
@@ -279,7 +277,7 @@ def data_experiment(feature_combo):
     print("Average TSS score on 2010:", performance_2010)
 
     # use the best performing feature combination from feature_experiment on 2010 data
-    svm_2020 = my_svm("2020")
+    svm_2020 = my_svm("2020-24")
 
     # combine feature sets
     X,Y = svm_2020.feature_combination_creator(feature_combo)
@@ -291,4 +289,5 @@ def data_experiment(feature_combo):
     print("Average TSS score on 2020:", performance_2020)
 
 best_set = feature_experiment()
-data_experiment(best_set)
+# best_set is "FS-IV"
+data_experiment()
